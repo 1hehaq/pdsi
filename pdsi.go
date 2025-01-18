@@ -27,14 +27,15 @@ var sensitiveKeywords = []string{
 
 	// financial & legal
 	"bank statement", "invoice", "salary", "contract",
-	"agreement", "nda", "non disclosure",
+	// "loss", "nda", "tax",
+	"agreement", "non disclosure",
 
 	// personal data
 	"passport", "social security", "ssn", "date of birth",
-	"credit card", "tax", "identity", "id number",
+	"credit card", "identity", "id number",
 
 	// business critical
-	"revenue", "profit", "loss", "financial report",
+	"revenue", "profit", "financial report",
 	"quarterly report", "annual report", "audit",
 	"board meeting", "shareholders",
 
