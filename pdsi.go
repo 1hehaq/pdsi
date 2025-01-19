@@ -5,9 +5,9 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -17,9 +17,11 @@ const (
 	green   = "\033[32m"
 	greenbg = "\x1b[42m"
 	reset   = "\033[0m"
+	yellow  = "\033[33m"
 )
 
 var sensitiveKeywords = []string{
+
 	// personal & confidential
 	"confidential", "private", "restricted", "internal",
 	"not for distribution", "do not share", "proprietary",
@@ -27,64 +29,76 @@ var sensitiveKeywords = []string{
 
 	// financial & legal
 	"bank statement", "invoice", "salary", "contract",
-	// "loss", "nda", "tax",
 	"agreement", "non disclosure",
 
 	// personal data
 	"passport", "social security", "ssn", "date of birth",
 	"credit card", "identity", "id number",
 
-	// business critical
-	"revenue", "profit", "financial report",
-	"quarterly report", "annual report", "audit",
-	"board meeting", "shareholders",
-
 	// company internal
-	"internal use", "draft", "preliminary",
-	"company confidential", "staff only",
-	"management only", "executive", "internal",
+	"internal use only", "company confidential",
+	"staff only", "management only", "internal only",
 }
 
 func highlightKeywords(input string) string {
 	for _, keyword := range sensitiveKeywords {
-		input = strings.ReplaceAll(input, keyword, fmt.Sprintf("\033[33m%s%s", keyword, reset))
+		pattern := fmt.Sprintf(`(?i)\b%s\b`, regexp.QuoteMeta(keyword))
+		re := regexp.MustCompile(pattern)
+		input = re.ReplaceAllStringFunc(input, func(match string) string {
+			return fmt.Sprintf("\033[33m%s%s", match, reset)
+		})
 	}
 	return input
 }
 
-func analyzePDF(url string) {
-	fmt.Printf("%s[-]%s %sreading:%s %s\n", blue, reset, blue, reset, url)
+func analyzePDF(input string, isURL bool) {
+	if isURL {
+		fmt.Printf("%s[-]%s %sreading URL:%s %s\n", blue, reset, blue, reset, input)
 
-	cmd := exec.Command("wget", "--no-check-certificate", "-qO-", url)
-	output, err := cmd.Output()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s[!]%s %snot fetching:%s %s\n", red, reset, red, reset, url)
-		return
+		cmd := exec.Command("wget", "--no-check-certificate", "-qO-", input)
+		output, err := cmd.Output()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s[!]%s %snot fetching:%s %s\n", red, reset, red, reset, input)
+			return
+		}
+
+		pdftotextCmd := exec.Command("pdftotext", "-", "-")
+		pdftotextCmd.Stdin = bytes.NewReader(output)
+		pdfOutput, err := pdftotextCmd.Output()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s[!]%s %snot processing:%s %s\n", red, reset, red, reset, input)
+			return
+		}
+
+		processPDFOutput(pdfOutput, input)
+	} else {
+		fmt.Printf("%s[-]%s %sreading file:%s %s\n", blue, reset, blue, reset, input)
+
+		pdftotextCmd := exec.Command("pdftotext", input, "-")
+		pdfOutput, err := pdftotextCmd.Output()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s[!]%s %snot processing:%s %s\n", red, reset, red, reset, input)
+			return
+		}
+
+		processPDFOutput(pdfOutput, input)
 	}
+}
 
-	pdftotextCmd := exec.Command("pdftotext", "-", "-")
-	pdftotextCmd.Stdin = bytes.NewReader(output)
-	pdfOutput, err := pdftotextCmd.Output()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s[!]%s %snot processing:%s %s\n", red, reset, red, reset, url)
-		return
-	}
-
+func processPDFOutput(pdfOutput []byte, source string) {
 	scanner := bufio.NewScanner(bytes.NewReader(pdfOutput))
 	foundSensitive := false
 	for scanner.Scan() {
 		line := scanner.Text()
-		for _, keyword := range sensitiveKeywords {
-			if strings.Contains(strings.ToLower(line), strings.ToLower(keyword)) {
-				highlighted := highlightKeywords(line)
-				fmt.Printf("%s[+]%s %ssensitive:%s %s\n", green, reset, greenbg, reset, highlighted)
-				foundSensitive = true
-			}
+		highlighted := highlightKeywords(line)
+		if highlighted != line {
+			fmt.Printf("%s[+]%s %ssensitive:%s %s\n", green, reset, greenbg, reset, highlighted)
+			foundSensitive = true
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "%s[!]%s %sfailed to scan pdf:%s %s\n", red, reset, red, reset, url)
+		fmt.Fprintf(os.Stderr, "%s[!]%s %sfailed to scan:%s %s\n", red, reset, red, reset, source)
 	}
 
 	if !foundSensitive {
@@ -93,38 +107,67 @@ func analyzePDF(url string) {
 }
 
 func main() {
-	pdfFlag := flag.String("pdf", "", "path to a file containing a list of PDF URLs")
+	fmt.Println(yellow + `
+               __     _ 
+    ____  ____/ /____(_)
+   / __ \/ __  / ___/ / 
+  / /_/ / /_/ (__  ) /  
+ / .___/\__,_/____/_/   ` + red + "\033]8;;https://github.com/1hehaq\033\\@1hehaq\033]8;;\033\\" + yellow + `
+/_/
+
+` + reset)
+
+	localPDF := flag.String("local", "", "path to local PDF files, separated by commas or stdin")
+	matchKeywords := flag.String("match", "", "custom keywords to match, separated by commas")
 	flag.Parse()
 
-	var reader io.Reader
+	pdfRegex := regexp.MustCompile(`(?i)\.pdf$`)
+	urlRegex := regexp.MustCompile(`^https?://`)
 
-	if *pdfFlag != "" {
-		file, err := os.Open(*pdfFlag)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s[!]%s %sfailed to open:%s %v\n", red, reset, red, reset, err)
+	if *matchKeywords != "" {
+		sensitiveKeywords = strings.Split(*matchKeywords, ",")
+		for i := range sensitiveKeywords {
+			sensitiveKeywords[i] = strings.TrimSpace(sensitiveKeywords[i])
+		}
+	}
+
+	processInput := func(input string) {
+		if !pdfRegex.MatchString(input) {
+			fmt.Fprintf(os.Stderr, "%s[!]%s %sinvalid file ext!:%s %s\n", red, reset, red, reset, input)
+			return
+		}
+
+		if _, err := os.Stat(input); err == nil {
+			analyzePDF(input, false)
+		} else if urlRegex.MatchString(input) {
+			analyzePDF(input, true)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s[!]%s %sfile not found:%s %s\n", red, reset, red, reset, input)
+		}
+	}
+
+	if *localPDF != "" {
+		files := strings.Split(*localPDF, ",")
+		for _, file := range files {
+			processInput(strings.TrimSpace(file))
+		}
+		return
+	}
+
+	info, _ := os.Stdin.Stat()
+	if info.Mode()&os.ModeCharDevice == 0 {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			processInput(strings.TrimSpace(scanner.Text()))
+		}
+
+		if err := scanner.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "%s[!]%s %serror reading input:%s %v\n", red, reset, red, reset, err)
 			os.Exit(1)
 		}
-		defer file.Close()
-		reader = file
-	} else {
-		info, _ := os.Stdin.Stat()
-		if info.Mode()&os.ModeCharDevice != 0 {
-			fmt.Fprintf(os.Stderr, "%s[!]%s %sno input provided%s\n", red, reset, red, reset)
-			os.Exit(1)
-		}
-		reader = os.Stdin
+		return
 	}
 
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		url := scanner.Text()
-		if strings.TrimSpace(url) != "" {
-			analyzePDF(url)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "%s[!]%s %serror reading input:%s %v\n", red, reset, red, reset, err)
-		os.Exit(1)
-	}
+	fmt.Fprintf(os.Stderr, "%s[!]%s %sno input provided%s\n", red, reset, red, reset)
+	os.Exit(1)
 }
